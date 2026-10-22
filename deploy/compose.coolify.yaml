@@ -1,0 +1,128 @@
+# 生产部署专用 Compose —— 供 Coolify 使用
+# 只拉取预构建镜像（由 GitHub Actions 推送到 ghcr.io），不在服务器上构建。
+# 敏感变量由 Coolify 环境变量界面填写，不写入仓库。
+#
+# 使用方式：Coolify Dashboard → 新建 Resource → Docker Compose → 指向此文件
+
+name: ai-platform
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  gateway:
+    image: ghcr.io/${GITHUB_REPOSITORY}/gateway:latest
+    restart: unless-stopped
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      IDENTITY_URL: http://identity:8000
+      WORKFLOW_URL: http://workflow:8000
+      MEDIA_URL: http://media:8000
+      BLOG_URL: http://blog-rag:8000
+      BOOKMARK_URL: http://bookmark:8000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    depends_on:
+      - identity
+      - workflow
+      - media
+      - blog-rag
+      - bookmark
+
+  identity:
+    image: ghcr.io/${GITHUB_REPOSITORY}/identity:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/identity
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  workflow:
+    image: ghcr.io/${GITHUB_REPOSITORY}/workflow:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/workflow
+      CHECKPOINT_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/agent
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      MEDIA_URL: http://media:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  media:
+    image: ghcr.io/${GITHUB_REPOSITORY}/media:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/media
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio123456}
+      MINIO_BUCKET: media
+      LOCAL_STORAGE: /data/objects
+    volumes:
+      - media_objects:/data/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  blog-rag:
+    image: ghcr.io/${GITHUB_REPOSITORY}/blog-rag:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/blog
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  bookmark:
+    image: ghcr.io/${GITHUB_REPOSITORY}/bookmark:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/bookmark
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio123456}
+      MINIO_BUCKET: bookmarks
+      LOCAL_STORAGE: /data/objects
+    volumes:
+      - bookmark_objects:/data/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    image: ghcr.io/${GITHUB_REPOSITORY}/web:latest
+    restart: unless-stopped
+    depends_on:
+      - gateway
+
+volumes:
+  postgres_data:
+  media_objects:
+  bookmark_objects:

@@ -1,0 +1,25 @@
+[project]
+name = "workflow"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "asyncpg>=0.30",
+  "pydantic-settings>=2.6",
+  "langgraph>=0.4",
+  "langgraph-checkpoint-postgres>=2.0",
+  "psycopg[binary]>=3.2",
+  "psycopg-pool>=3.2",
+  "litellm>=1.60",
+  "cryptography>=44.0",
+  "httpx>=0.28",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
