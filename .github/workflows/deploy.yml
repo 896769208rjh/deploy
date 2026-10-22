@@ -50,7 +50,7 @@ jobs:
     name: 通知 Coolify 重新部署
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ vars.COOLIFY_WEBHOOK_URL != '' || secrets.COOLIFY_WEBHOOK_URL != '' }}
+    # 始终运行，在 step 里判断是否配置了 webhook
     steps:
       - name: 触发 Coolify 重新拉取并重启
         run: |
