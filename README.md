@@ -23,6 +23,8 @@ npm run dev   # http://localhost:5173
 
 模型节点填 `mock` 可以在没有密钥时演练流式输出；视频接口地址填 `mock` 会使用样片。
 
+视频平台接入、文生视频模型筛选和各家接口差异见 [视频模型接入](docs/视频模型接入.md)。
+
 ---
 
 ## 生产部署（服务器 + Coolify + GitHub Actions）

@@ -198,7 +198,7 @@ def make_media(node_id: str, data: dict, emit: Emit, owner_id: uuid.UUID, run_id
         prompt = render_template(data.get("prompt") or "{{prev}}", state.get("run_input", ""), state.get("last_output", ""))
         if not prompt.strip():
             prompt = state.get("last_output") or state.get("run_input") or ""
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             response = await client.post(
                 f"{settings.media_url}/api/media/internal/generate",
                 json={"prompt": prompt, "title": prompt[:80], "run_id": str(run_id)},

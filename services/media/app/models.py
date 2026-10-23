@@ -16,6 +16,7 @@ class VideoApiConfig(Base):
     base_url: Mapped[str] = mapped_column(String(500))
     api_key_encrypted: Mapped[str] = mapped_column(Text)
     model: Mapped[str] = mapped_column(String(200), default="")  # 用户选定的模型
+    provider: Mapped[str] = mapped_column(String(32), default="auto", server_default="auto")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

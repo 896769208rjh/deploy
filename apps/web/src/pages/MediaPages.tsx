@@ -1,12 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clapperboard, ChevronDown, Eye, EyeOff, Film, Loader, Play, RefreshCw, Save, Sparkles, Zap } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { Clapperboard, Eye, EyeOff, Film, Loader, Play, RefreshCw, Sparkles } from "lucide-react";
+import { useState } from "react";
 import { api } from "../api";
+import { VideoConfig, type MediaConfig } from "../components/VideoConfig";
 
 type Post = { id: string; title: string; prompt: string; video_url: string; visibility: string };
-type MediaConfig = { id: string; base_url: string; has_api_key: boolean; model: string };
-type ProbeModel = { id: string; name: string; owned_by?: string };
-type ProbeResult = { models: ProbeModel[]; endpoint_type: string; hint?: string };
 
 export function Plaza() {
   const query = useQuery({ queryKey: ["plaza"], queryFn: () => api<Post[]>("/api/media/plaza") });
@@ -37,30 +35,10 @@ export function Profile() {
   const posts = useQuery({ queryKey: ["profile"], queryFn: () => api<Post[]>("/api/media/profile") });
   const configs = useQuery({ queryKey: ["media-config"], queryFn: () => api<MediaConfig[]>("/api/media/configs") });
 
-  const [baseUrl, setBaseUrl] = useState("mock");
-  const [apiKey, setApiKey] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
-  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
-  const [probing, setProbing] = useState(false);
-  const [probeError, setProbeError] = useState("");
-  const [saveError, setSaveError] = useState("");
-
   const [prompt, setPrompt] = useState("雨夜便利店，黄雨衣，推门");
   const [generateError, setGenerateError] = useState("");
 
   const currentConfig = configs.data?.[0];
-
-  const saveConfig = useMutation({
-    mutationFn: () => api("/api/media/configs", {
-      method: "POST",
-      body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model: selectedModel }),
-    }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ["media-config"] });
-      setSaveError("");
-    },
-    onError: (err) => setSaveError(err instanceof Error ? err.message : "保存失败"),
-  });
 
   const generate = useMutation({
     mutationFn: (publish: boolean) =>
@@ -76,35 +54,6 @@ export function Profile() {
     onError: (err) => setGenerateError(err instanceof Error ? err.message : "生成失败"),
   });
 
-  async function handleProbe() {
-    if (!baseUrl.trim() || baseUrl.trim().toLowerCase() === "mock") {
-      setProbeResult({ models: [{ id: "mock", name: "样片（mock）" }], endpoint_type: "mock" });
-      setSelectedModel("mock");
-      return;
-    }
-    if (!apiKey.trim()) { setProbeError("请先填写密钥再探测模型"); return; }
-    setProbing(true);
-    setProbeError("");
-    setProbeResult(null);
-    try {
-      const result = await api<ProbeResult>("/api/media/configs/probe", {
-        method: "POST",
-        body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
-      });
-      setProbeResult(result);
-      if (result.models.length > 0) setSelectedModel(result.models[0].id);
-    } catch (err) {
-      setProbeError(err instanceof Error ? err.message : "探测失败");
-    } finally {
-      setProbing(false);
-    }
-  }
-
-  function onSave(e: FormEvent) {
-    e.preventDefault();
-    saveConfig.mutate();
-  }
-
   return (
     <section className="page">
       <div className="page-header">
@@ -114,122 +63,7 @@ export function Profile() {
         </div>
       </div>
 
-      {/* API config panel */}
-      <div className="panel">
-        <div className="panel-title">视频接口配置</div>
-        <div className="panel-desc">
-          填写接口地址和密钥，点击<strong>探测模型</strong>获取可用的生成模型列表，再选择后保存。地址填{" "}
-          <code style={{ fontFamily: "var(--font-mono)", fontSize: 12, background: "#f1f5f9", padding: "1px 6px", borderRadius: 4 }}>mock</code>{" "}
-          直接使用样片。
-        </div>
-        <form className="form-stack" onSubmit={onSave}>
-          {/* URL + Key row */}
-          <div className="form-row">
-            <label className="label" style={{ flex: "1 1 0" }}>
-              接口地址
-              <input
-                className="input"
-                value={baseUrl}
-                placeholder="mock 或 https://api.example.com/v1/generate"
-                onChange={(e) => { setBaseUrl(e.target.value); setProbeResult(null); setSelectedModel(""); }}
-              />
-            </label>
-            <label className="label" style={{ flex: "1 1 0" }}>
-              密钥
-              <input
-                className="input"
-                type="password"
-                value={apiKey}
-                placeholder="sk-..."
-                onChange={(e) => { setApiKey(e.target.value); setProbeResult(null); setSelectedModel(""); }}
-              />
-            </label>
-          </div>
-
-          {/* Probe button */}
-          <div>
-            <button
-              className="btn btn-secondary btn-sm"
-              type="button"
-              disabled={probing || !baseUrl.trim()}
-              onClick={handleProbe}
-            >
-              {probing
-                ? <><Loader size={13} className="animate-spin" /> 探测中…</>
-                : <><Zap size={13} /> 探测可用模型</>}
-            </button>
-            {probeError && <p className="msg-error" style={{ marginTop: 6 }}><span>⚠</span> {probeError}</p>}
-          </div>
-
-          {/* Model select — shown only after probe */}
-          {probeResult && (
-            <div className="animate-fade-in">
-              {probeResult.models.length > 0 ? (
-                <label className="label">
-                  选择模型
-                  <div style={{ position: "relative" }}>
-                    <select
-                      className="select"
-                      value={selectedModel}
-                      onChange={(e) => setSelectedModel(e.target.value)}
-                      style={{ paddingRight: 36, appearance: "none" }}
-                    >
-                      {probeResult.models.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name !== m.id ? `${m.name} (${m.id})` : m.id}
-                          {m.owned_by ? ` · ${m.owned_by}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown
-                      size={15}
-                      style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", color: "var(--color-text-faint)" }}
-                    />
-                  </div>
-                  <span className="msg-muted" style={{ marginTop: 2 }}>
-                    探测到 {probeResult.models.length} 个模型
-                    {probeResult.endpoint_type === "openai" && " · OpenAI 兼容接口"}
-                  </span>
-                </label>
-              ) : (
-                <div style={{ padding: "10px 12px", background: "#fffbeb", border: "1px solid #fbbf24", borderRadius: 8, fontSize: 13, color: "#92400e" }}>
-                  <strong>提示：</strong>{probeResult.hint || "未探测到标准模型列表，可直接手动填写模型名称后保存。"}
-                  <div style={{ marginTop: 8 }}>
-                    <label className="label">
-                      手动填写模型名称
-                      <input
-                        className="input"
-                        value={selectedModel}
-                        placeholder="例如 wanx-v1、stable-video ..."
-                        onChange={(e) => setSelectedModel(e.target.value)}
-                      />
-                    </label>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {saveError && <p className="msg-error"><span>⚠</span> {saveError}</p>}
-
-          {/* Save button */}
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <button
-              className="btn btn-primary btn-sm"
-              type="submit"
-              disabled={saveConfig.isPending || (!selectedModel && baseUrl.trim().toLowerCase() !== "mock" && !!probeResult)}
-            >
-              <Save size={13} /> {saveConfig.isPending ? "保存中…" : "保存配置"}
-            </button>
-            {currentConfig && (
-              <span className="msg-muted">
-                当前：<strong>{currentConfig.base_url}</strong>
-                {currentConfig.model && <> · 模型：<strong>{currentConfig.model}</strong></>}
-              </span>
-            )}
-          </div>
-        </form>
-      </div>
+      <VideoConfig current={currentConfig} />
 
       {/* Generate panel */}
       <div className="panel">

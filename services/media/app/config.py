@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     minio_bucket: str = "media"
     sample_path: str = "/app/sample.mp4"
     local_storage: str = "/data/objects"
+    video_timeout_seconds: int = 480
+    video_poll_interval_seconds: float = 3
 
 
 settings = Settings()

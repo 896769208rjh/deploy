@@ -50,8 +50,9 @@ def require_internal(x_internal_token: str | None = Header(default=None)) -> Non
 
 
 def assert_download_host(url: str) -> None:
-    host = urlparse(url).hostname
-    if not host:
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
         raise HTTPException(status_code=422, detail="视频地址不正确")
     if host in {"metadata.google.internal", "metadata.internal"}:
         raise HTTPException(status_code=422, detail="不能下载这个地址")

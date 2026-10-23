@@ -1,6 +1,7 @@
 import asyncio
 
 from fastapi import FastAPI
+from sqlalchemy import text
 
 from app.api import router
 from app.db import Base, engine
@@ -17,6 +18,8 @@ async def startup() -> None:
         try:
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
+                # Existing installations predate provider selection; keep old configurations on auto detection.
+                await connection.execute(text("ALTER TABLE video_api_configs ADD COLUMN IF NOT EXISTS provider VARCHAR(32) NOT NULL DEFAULT 'auto'"))
             await asyncio.to_thread(ensure_bucket)
             return
         except Exception as exc:

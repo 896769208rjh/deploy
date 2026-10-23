@@ -1,18 +1,16 @@
 import uuid
-from pathlib import Path
-
-import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.db import get_session
 from app.models import Post, VideoApiConfig
-from app.security import Actor, assert_download_host, decrypt_secret, encrypt_secret, require_actor, require_internal
+from app.security import Actor, decrypt_secret, encrypt_secret, require_actor, require_internal
 from app.storage import local_path, presign, put_bytes
+from app.video_catalog import PROVIDERS, ProviderId, resolve_provider, validate_model
+from app.video_providers import generate_video, probe_video_models
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -32,11 +30,14 @@ class ConfigBody(BaseModel):
     base_url: str = Field(min_length=1, max_length=500)
     api_key: str = Field(default="", max_length=500)
     model: str = Field(default="", max_length=200)
+    provider: ProviderId = "auto"
 
 
 class ProbeBody(BaseModel):
     base_url: str = Field(min_length=1, max_length=500)
-    api_key: str = Field(min_length=1, max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    provider: ProviderId = "auto"
+    config_id: uuid.UUID | None = None
 
 
 class GenerateBody(BaseModel):
@@ -52,7 +53,7 @@ class VisibilityBody(BaseModel):
 
 
 def config_payload(item: VideoApiConfig) -> dict:
-    return {"id": item.id, "base_url": item.base_url, "has_api_key": bool(item.api_key_encrypted), "model": item.model, "created_at": item.created_at}
+    return {"id": item.id, "base_url": item.base_url, "has_api_key": bool(item.api_key_encrypted), "model": item.model, "provider": item.provider, "created_at": item.created_at}
 
 
 def post_payload(item: Post) -> dict:
@@ -74,33 +75,9 @@ async def store_video(owner_id: uuid.UUID, prompt: str, title: str, visibility: 
     return Post(author_id=owner_id, title=title or prompt[:80], prompt=prompt, video_key=key, run_id=run_id, visibility=visibility)
 
 
-async def fetch_video(base_url: str, api_key: str, prompt: str, model: str = "") -> bytes:
-    if base_url.strip().lower() == "mock":
-        path = Path(settings.sample_path)
-        if not path.exists():
-            raise HTTPException(status_code=500, detail="样片还没有准备好")
-        return path.read_bytes()
-    async with httpx.AsyncClient(timeout=180, follow_redirects=False) as client:
-        request_body: dict = {"prompt": prompt}
-        if model:
-            request_body["model"] = model
-        response = await client.post(base_url, json=request_body, headers={"Authorization": f"Bearer {api_key}"})
-        if response.status_code >= 400:
-            raise HTTPException(status_code=502, detail="视频接口返回了错误")
-        content_type = response.headers.get("content-type", "")
-        if content_type.startswith("video/"):
-            return response.content
-        if "application/json" in content_type:
-            payload = response.json()
-            video_url = payload.get("video_url") or payload.get("url")
-            if not video_url:
-                raise HTTPException(status_code=502, detail="视频接口没有返回 video_url")
-            assert_download_host(video_url)
-            video = await client.get(video_url)
-            if video.status_code >= 400 or not video.content:
-                raise HTTPException(status_code=502, detail="成片下载失败")
-            return video.content
-    raise HTTPException(status_code=502, detail="无法识别视频接口的响应")
+@router.get("/providers")
+async def list_providers(_: Actor = Depends(require_actor)) -> list[dict]:
+    return [{"id": key, "name": info.name, "base_url": info.base_url, "hint": info.hint} for key, info in PROVIDERS.items()]
 
 
 async def latest_config(session: AsyncSession, owner_id: uuid.UUID) -> VideoApiConfig:
@@ -122,11 +99,14 @@ async def list_configs(actor: Actor = Depends(require_actor), session: AsyncSess
 async def create_config(body: ConfigBody, actor: Actor = Depends(require_actor), session: AsyncSession = Depends(get_session)) -> dict:
     if body.base_url.strip().lower() != "mock" and not body.api_key:
         raise HTTPException(status_code=422, detail="请填写接口密钥")
+    kind = resolve_provider(body.base_url, body.provider)
+    validate_model(body.model.strip(), kind)
     item = VideoApiConfig(
         owner_id=actor.id,
         base_url=body.base_url.strip(),
         api_key_encrypted=encrypt_secret(body.api_key) if body.api_key else "",
         model=body.model.strip(),
+        provider=body.provider,
     )
     session.add(item)
     await session.commit()
@@ -144,63 +124,41 @@ async def update_config(
     item = await session.get(VideoApiConfig, config_id)
     if item is None or item.owner_id != actor.id:
         raise HTTPException(status_code=404, detail="找不到这个配置")
+    kind = resolve_provider(body.base_url, body.provider)
+    validate_model(body.model.strip(), kind)
+    if kind != "mock" and not body.api_key and not item.api_key_encrypted:
+        raise HTTPException(status_code=422, detail="请填写接口密钥")
+    if kind != "mock" and not body.api_key and (body.base_url.strip() != item.base_url or body.provider != item.provider):
+        raise HTTPException(status_code=422, detail="更换接口地址或类型时，请重新填写该平台密钥")
     item.base_url = body.base_url.strip()
     if body.api_key:
         item.api_key_encrypted = encrypt_secret(body.api_key)
     item.model = body.model.strip()
+    item.provider = body.provider
     await session.commit()
     await session.refresh(item)
     return config_payload(item)
 
 
 @router.post("/configs/probe")
-async def probe_models(body: ProbeBody, actor: Actor = Depends(require_actor)) -> dict:
-    """探测用户填写的视频接口，返回可用的视频生成模型列表。"""
-    if body.base_url.strip().lower() == "mock":
-        return {"models": [{"id": "mock", "name": "样片（mock）"}], "endpoint_type": "mock"}
-
-    base = body.base_url.strip().rstrip("/")
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        # 尝试 OpenAI 兼容的 /models 端点
-        models_url = base if base.endswith("/models") else f"{base}/models"
-        try:
-            resp = await client.get(models_url, headers={"Authorization": f"Bearer {body.api_key}"})
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="无法连接到该接口") from exc
-
-        if resp.status_code == 404:
-            # /models 不存在，可能是自定义接口，提示用户直接填写
-            return {"models": [], "endpoint_type": "unknown", "hint": "该接口未提供 /models 端点，可直接保存后尝试生成"}
-        if resp.status_code >= 400:
-            detail = "接口返回错误"
-            try:
-                detail = resp.json().get("error", {}).get("message", "") or resp.text[:200]
-            except Exception:
-                pass
-            raise HTTPException(status_code=502, detail=f"接口返回 {resp.status_code}：{detail}")
-
-        models: list[dict] = []
-        try:
-            payload = resp.json()
-            raw = payload.get("data", payload) if isinstance(payload, dict) else payload
-            if isinstance(raw, list):
-                for item in raw:
-                    if isinstance(item, dict):
-                        mid = item.get("id") or item.get("model") or item.get("name", "")
-                        if mid:
-                            models.append({"id": mid, "name": item.get("name", mid), "owned_by": item.get("owned_by", "")})
-                    elif isinstance(item, str) and item:
-                        models.append({"id": item, "name": item})
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail="无法解析模型列表") from exc
-
-        return {"models": models, "endpoint_type": "openai"}
+async def probe_models(body: ProbeBody, actor: Actor = Depends(require_actor), session: AsyncSession = Depends(get_session)) -> dict:
+    api_key = body.api_key.strip()
+    if not api_key and body.config_id:
+        config = await session.get(VideoApiConfig, body.config_id)
+        if config is None or config.owner_id != actor.id:
+            raise HTTPException(status_code=404, detail="找不到这个配置")
+        if config.base_url != body.base_url.strip() or config.provider != body.provider:
+            raise HTTPException(status_code=422, detail="更换接口时请重新填写密钥")
+        api_key = decrypt_secret(config.api_key_encrypted)
+    if body.base_url.strip().lower() != "mock" and not api_key:
+        raise HTTPException(status_code=422, detail="请填写接口密钥")
+    return await probe_video_models(body.base_url, api_key, body.provider)
 
 
 async def generate_for(owner_id: uuid.UUID, body: GenerateBody, session: AsyncSession) -> Post:
     config = await latest_config(session, owner_id)
     model = body.model.strip() or config.model
-    data = await fetch_video(config.base_url, decrypt_secret(config.api_key_encrypted), body.prompt, model)
+    data = await generate_video(config.base_url, decrypt_secret(config.api_key_encrypted), body.prompt, model, config.provider)
     post = await store_video(owner_id, body.prompt, body.title, "public" if body.publish else "private", body.run_id, data)
     session.add(post)
     await session.commit()
